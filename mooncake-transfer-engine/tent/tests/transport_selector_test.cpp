@@ -65,6 +65,7 @@ class FakeTransport : public Transport {
     // Helper to set capabilities (accessing protected member)
     void setDramToFile(bool val) { caps.dram_to_file = val; }
     void setGpuToFile(bool val) { caps.gpu_to_file = val; }
+    void setNpuToFile(bool val) { caps.npu_to_file = val; }
     void setDramToDram(bool val) { caps.dram_to_dram = val; }
     void setGpuToGpu(bool val) { caps.gpu_to_gpu = val; }
     void setDramToGpu(bool val) { caps.dram_to_gpu = val; }
@@ -140,6 +141,47 @@ TEST(TransportSelectorTest, DefaultPoliciesFileSegmentGpuMemory) {
         << "File segment with GPU should prefer GDS first";
 }
 
+TEST(TransportSelectorTest, DefaultPoliciesFileSegmentNpuMemory) {
+    auto conf = std::make_shared<Config>();
+    TransportSelector selector(conf);
+
+    std::array<std::shared_ptr<Transport>, kSupportedTransportTypes>
+        transports{};
+    transports[XDS] = std::make_shared<FakeTransport>(XDS);
+    transports[GDS] = std::make_shared<FakeTransport>(GDS);
+    transports[IOURING] = std::make_shared<FakeTransport>(IOURING);
+
+    auto* xds = static_cast<FakeTransport*>(transports[XDS].get());
+    auto* gds = static_cast<FakeTransport*>(transports[GDS].get());
+    auto* iouring = static_cast<FakeTransport*>(transports[IOURING].get());
+    xds->setNpuToFile(true);
+    gds->setGpuToFile(true);
+    gds->setDramToFile(true);
+    iouring->setDramToFile(true);
+
+    SelectionContext npu;
+    npu.segment_type = SegmentType::File;
+    npu.same_machine = true;
+    npu.local_memory_type = MTYPE_NPU;
+    npu.remote_memory_type = MTYPE_CPU;
+    npu.transfer_size = 4096;
+    npu.priority_level = 0;
+    npu.buffer_transports = nullptr;
+    auto npu_result = selector.select(npu, transports);
+    EXPECT_EQ(npu_result.transport, XDS);
+
+    SelectionContext cuda;
+    cuda.segment_type = SegmentType::File;
+    cuda.same_machine = true;
+    cuda.local_memory_type = MTYPE_CUDA;
+    cuda.remote_memory_type = MTYPE_CPU;
+    cuda.transfer_size = 4096;
+    cuda.priority_level = 0;
+    cuda.buffer_transports = nullptr;
+    auto cuda_result = selector.select(cuda, transports);
+    EXPECT_EQ(cuda_result.transport, GDS);
+}
+
 TEST(TransportSelectorTest, DefaultPoliciesMemorySegment) {
     auto conf = std::make_shared<Config>();
     TransportSelector selector(conf);
@@ -188,6 +230,7 @@ TEST(TransportSelectorTest, TransportTypeNameMapping) {
     EXPECT_STREQ(transportTypeName(SUNRISE_LINK), "sunrise_link");
     EXPECT_STREQ(transportTypeName(UB), "ub");
     EXPECT_STREQ(transportTypeName(MPCOMM), "mpcomm");
+    EXPECT_STREQ(transportTypeName(XDS), "xds");
 }
 
 TEST(TransportSelectorTest, ParseTransportType) {
@@ -203,6 +246,7 @@ TEST(TransportSelectorTest, ParseTransportType) {
     EXPECT_EQ(parseTransportType("sunrise_link"), SUNRISE_LINK);
     EXPECT_EQ(parseTransportType("ub"), UB);
     EXPECT_EQ(parseTransportType("mpcomm"), MPCOMM);
+    EXPECT_EQ(parseTransportType("xds"), XDS);
     EXPECT_EQ(parseTransportType("unknown"), UNSPEC);
 }
 
@@ -226,7 +270,8 @@ TEST(TransportTypeTest, WireValuesRemainStableWithUbAppended) {
     EXPECT_EQ(static_cast<int>(TPU), 10);
     EXPECT_EQ(static_cast<int>(UB), 11);
     EXPECT_EQ(static_cast<int>(MPCOMM), 12);
-    EXPECT_EQ(static_cast<int>(kNumTransportTypes), 13);
+    EXPECT_EQ(static_cast<int>(XDS), 13);
+    EXPECT_EQ(static_cast<int>(kNumTransportTypes), 14);
 }
 
 // MPComm is appended after UB, so it takes wire value 12. The same integer is
@@ -243,6 +288,11 @@ TEST(TransportTypeTest, MpcommWireValueMatchesCApiAndRoundTrips) {
     // "transports": ["mpcomm"] resolve to UNSPEC silently.
     EXPECT_STREQ(transportTypeName(MPCOMM), "mpcomm");
     EXPECT_EQ(parseTransportType("mpcomm"), MPCOMM);
+    EXPECT_EQ(static_cast<int>(XDS), 13);
+    EXPECT_EQ(TRANSPORT_XDS, static_cast<int>(XDS));
+    EXPECT_EQ(c_to_transport_hint(TRANSPORT_XDS), XDS);
+    EXPECT_STREQ(transportTypeName(XDS), "xds");
+    EXPECT_EQ(parseTransportType("xds"), XDS);
 }
 
 // Topology::NicType is serialized as an integer. These values are therefore a

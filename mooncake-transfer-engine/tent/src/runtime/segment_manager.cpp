@@ -14,6 +14,12 @@
 
 #include "tent/runtime/segment_manager.h"
 
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cassert>
 #include <filesystem>
 #include <set>
@@ -200,8 +206,30 @@ Status SegmentManager::makeFileRemote(SegmentDescRef &desc,
     }
 
     struct stat st;
-    if (stat(path.c_str(), &st) || !S_ISREG(st.st_mode))
+    if (stat(path.c_str(), &st))
         return Status::InvalidArgument(std::string("Invalid path: ") + path);
+
+    uint64_t length = 0;
+    if (S_ISREG(st.st_mode)) {
+        if (st.st_size < 0)
+            return Status::InvalidArgument(std::string("Invalid path: ") +
+                                           path);
+        length = static_cast<uint64_t>(st.st_size);
+    } else if (S_ISBLK(st.st_mode)) {
+        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0)
+            return Status::InvalidArgument(std::string("Invalid path: ") +
+                                           path);
+        uint64_t bytes = 0;
+        int rc = ioctl(fd, BLKGETSIZE64, &bytes);
+        close(fd);
+        if (rc != 0 || bytes == 0)
+            return Status::InvalidArgument(std::string("Invalid path: ") +
+                                           path);
+        length = bytes;
+    } else {
+        return Status::InvalidArgument(std::string("Invalid path: ") + path);
+    }
 
     desc = std::make_shared<SegmentDesc>();
     desc->name = segment_name;
@@ -210,7 +238,7 @@ Status SegmentManager::makeFileRemote(SegmentDescRef &desc,
     FileSegmentDesc detail;
     FileBufferDesc buffer;
     buffer.path = path;
-    buffer.length = st.st_size;
+    buffer.length = length;
     buffer.offset = 0;
     detail.buffers.push_back(buffer);
     desc->detail = detail;

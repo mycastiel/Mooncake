@@ -209,7 +209,7 @@ Status BufIoTransport::submitTransferTasks(
         ssize_t io_ret = 0;
 
         if (req.opcode == Request::READ) {
-            if (mtype == MTYPE_CUDA) {
+            if (mtype == MTYPE_CUDA || mtype == MTYPE_NPU) {
                 std::unique_ptr<uint8_t[]> host_buf(new (std::nothrow)
                                                         uint8_t[req.length]);
                 if (!host_buf) {
@@ -237,7 +237,7 @@ Status BufIoTransport::submitTransferTasks(
                 }
             }
         } else if (req.opcode == Request::WRITE) {
-            if (mtype == MTYPE_CUDA) {
+            if (mtype == MTYPE_CUDA || mtype == MTYPE_NPU) {
                 std::unique_ptr<uint8_t[]> host_buf(new (std::nothrow)
                                                         uint8_t[req.length]);
                 if (!host_buf) {

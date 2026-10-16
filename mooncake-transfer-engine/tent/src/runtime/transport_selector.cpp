@@ -94,7 +94,7 @@ std::vector<SelectionPolicy> TransportSelector::getDefaultPolicies() {
             std::nullopt,    // max_size
             std::nullopt,    // priority
             {},              // devices (empty = all devices)
-            {GDS, IOURING},  // File priority (original: GDS -> IOURING)
+            {XDS, GDS, IOURING},  // File: XDS, then GDS, then io_uring
             std::nullopt,    // service_level
             std::nullopt,    // traffic_class
             std::nullopt,    // qp_pool
@@ -374,6 +374,9 @@ bool TransportSelector::matchesMemoryPattern(const std::string& pattern,
         case MTYPE_CUDA:
             type_str = kMemoryTypeCuda;
             break;
+        case MTYPE_NPU:
+            type_str = "npu";
+            break;
         case MTYPE_ROCM:
             return isAmdGpuLocationType(pattern);
         case MTYPE_TPU:
@@ -483,12 +486,16 @@ bool TransportSelector::isTransportAvailable(
     // dram_to_gpu); it never satisfies gpu_to_gpu, so cross-node TPU traffic is
     // always staged through host DRAM.
     auto is_gpu = [](MemoryType t) {
-        return t == MTYPE_CUDA || t == MTYPE_ROCM || t == MTYPE_TPU;
+        return t == MTYPE_CUDA || t == MTYPE_ROCM || t == MTYPE_TPU ||
+               t == MTYPE_NPU;
     };
 
-    // For file segments, check file-specific capabilities (original logic)
+    // For file segments, check file-specific capabilities (original logic).
+    // NPU is also a device type for memory hops, but file I/O uses npu_to_file
+    // so GDS (gpu_to_file) is not selected for NPU buffers.
     if (context.segment_type == SegmentType::File) {
         if (context.local_memory_type == MTYPE_CPU) return caps.dram_to_file;
+        if (context.local_memory_type == MTYPE_NPU) return caps.npu_to_file;
         if (is_gpu(context.local_memory_type)) return caps.gpu_to_file;
         return false;
     }

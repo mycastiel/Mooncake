@@ -51,6 +51,21 @@ else()
   message(STATUS "GDS: Disabled")
 endif()
 
+# XDS (NPU HBM to local NVMe through libnds)
+set(NDS_ROOT
+    "/home/qyf/XDS/file_p2p"
+    CACHE PATH "Directory containing libnds and nds_api.h")
+find_path(NDS_INCLUDE nds_api.h HINTS ${NDS_ROOT} /home/hulk/xds_nds/file_p2p)
+find_library(NDS_LIB nds HINTS ${NDS_ROOT} /home/hulk/xds_nds/file_p2p)
+if(NDS_LIB AND NDS_INCLUDE)
+  message(STATUS "XDS: Enabled (${NDS_LIB})")
+  target_compile_definitions(tent_interface INTERFACE USE_XDS)
+  target_include_directories(tent_interface INTERFACE ${NDS_INCLUDE})
+  target_link_libraries(tent_interface INTERFACE ${NDS_LIB})
+else()
+  message(STATUS "XDS: Disabled")
+endif()
+
 # RDMA (ibverbs)
 find_library(IBVERBS_LIB ibverbs PATHS /usr/lib /usr/lib64 /usr/local/lib
                                        /usr/local/lib64)
@@ -121,6 +136,7 @@ foreach(
   platform_sunrise
   platform_tpu
   tent_xport_gds
+  tent_xport_xds
   tent_xport_uring
   tent_xport_bufio
   tent_xport_mnnvl
@@ -152,3 +168,9 @@ install(
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
+
+if(NDS_LIB AND NDS_INCLUDE)
+  add_executable(xds_nds_bench transport/xds/xds_nds_bench.cpp)
+  target_link_libraries(xds_nds_bench PRIVATE tent_link_group dl)
+  install(TARGETS xds_nds_bench RUNTIME DESTINATION bin)
+endif()

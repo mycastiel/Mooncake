@@ -29,6 +29,10 @@
 #include "tent/transport/gds/gds_transport.h"
 #endif
 
+#ifdef USE_XDS
+#include "tent/transport/xds/xds_transport.h"
+#endif
+
 #ifdef USE_URING
 #include "tent/transport/io_uring/io_uring_transport.h"
 #endif
@@ -87,6 +91,11 @@ Status TransferEngineImpl::loadTransports() {
 #ifdef USE_GDS
     if (conf_->get("transports/gds/enable", false))
         transport_list_[GDS] = std::make_shared<GdsTransport>();
+#endif
+
+#ifdef USE_XDS
+    if (conf_->get("transports/xds/enable", false))
+        transport_list_[XDS] = std::make_shared<XdsTransport>();
 #endif
 
 #if defined(USE_ASCEND) || defined(USE_ASCEND_DIRECT)

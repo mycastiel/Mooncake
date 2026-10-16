@@ -36,7 +36,7 @@ class AscendPlatform : public Platform {
 
     virtual Status copy(void *dst, void *src, size_t length);
 
-    virtual MemoryType getMemoryType(void *addr) { return MTYPE_CUDA; }
+    virtual MemoryType getMemoryType(void *addr) { return MTYPE_NPU; }
 
     virtual const std::vector<RangeLocation> getLocation(
         void *start, size_t len, bool skip_prefault = false);

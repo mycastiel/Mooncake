@@ -777,6 +777,7 @@ std::vector<TransportType> TransferEngineImpl::getSupportedTransports(
     if (transport_list_[SHM]) result.push_back(SHM);
     if (transport_list_[TCP]) result.push_back(TCP);
     if (transport_list_[GDS]) result.push_back(GDS);
+    if (transport_list_[XDS]) result.push_back(XDS);
     if (transport_list_[MPCOMM]) result.push_back(MPCOMM);
     if (transport_list_[TPU]) result.push_back(TPU);
     return result;
@@ -1072,13 +1073,16 @@ static bool isGpuType(MemoryType t) {
     // Treating it as a "gpu type" makes the capability checks route its
     // device<->host hop to TpuTransport (gpu_to_dram / dram_to_gpu) while
     // leaving gpu_to_gpu unsatisfiable, which forces host-DRAM staging.
-    return t == MTYPE_CUDA || t == MTYPE_ROCM || t == MTYPE_TPU;
+    return t == MTYPE_CUDA || t == MTYPE_ROCM || t == MTYPE_TPU ||
+           t == MTYPE_NPU;
 }
 
 static bool checkAvailability(const std::shared_ptr<Transport>& xport,
                               MemoryType local) {
-    if (local == MTYPE_CPU) return xport && xport->capabilities().dram_to_file;
-    if (isGpuType(local)) return xport && xport->capabilities().gpu_to_file;
+    if (!xport) return false;
+    if (local == MTYPE_CPU) return xport->capabilities().dram_to_file;
+    if (local == MTYPE_NPU) return xport->capabilities().npu_to_file;
+    if (isGpuType(local)) return xport->capabilities().gpu_to_file;
     return false;
 }
 
@@ -1098,7 +1102,7 @@ static bool checkAvailability(const std::shared_ptr<Transport>& xport,
 static MemoryType getTypeEnum(const std::string& type) {
     if (type == "cpu" || type == "*") return MTYPE_CPU;
     if (type == "cuda") return MTYPE_CUDA;
-    if (type == "npu") return MTYPE_CUDA;
+    if (type == "npu") return MTYPE_NPU;
     if (isAmdGpuLocationType(type)) return MTYPE_ROCM;
     if (type == "tpu") return MTYPE_TPU;
     return MTYPE_UNKNOWN;
@@ -1143,6 +1147,8 @@ SelectionResult TransferEngineImpl::getTransportType(const Request& request,
         SelectionResult result;
         std::vector<TransportType> raw;
         if (desc->type == SegmentType::File) {
+            if (checkAvailability(transport_list_[XDS], local_mtype))
+                raw.push_back(XDS);
             if (checkAvailability(transport_list_[GDS], local_mtype))
                 raw.push_back(GDS);
             if (checkAvailability(transport_list_[IOURING], local_mtype))

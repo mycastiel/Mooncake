@@ -1,0 +1,5 @@
+if(NDS_LIB AND NDS_INCLUDE)
+  add_library(tent_xport_xds STATIC xds_transport.cpp)
+  target_include_directories(tent_xport_xds PUBLIC ${NDS_INCLUDE})
+  target_link_libraries(tent_xport_xds PUBLIC tent_common ${NDS_LIB})
+endif()

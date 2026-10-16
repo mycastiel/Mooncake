@@ -38,13 +38,13 @@
  *     {
  *       "name": "file_storage",
  *       "segment_type": "file",
- *       "transports": ["gds", "io_uring", "rdma"]
+ *       "transports": ["xds", "gds", "io_uring", "rdma"]
  *     }
  *   ]
  * }
  *
  * If no "policy" is configured, defaults to original behavior:
- * - File: GDS -> IOURING -> RDMA
+ * - File: XDS -> GDS -> IOURING -> RDMA
  * - Memory: uses buffer_transports order
  */
 
