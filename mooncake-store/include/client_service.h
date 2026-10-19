@@ -12,6 +12,7 @@
 #include <vector>
 #include <ylt/util/tl/expected.hpp>
 #include <chrono>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "client_metric.h"
@@ -560,6 +561,14 @@ class Client {
         const std::unordered_map<std::string, std::vector<Slice>>&
             batch_slices);
 
+    // Read value bytes from local files into the destination slices through
+    // the XDS transport. `pins` in the locations must stay alive across this
+    // call; this method only uses path, offset, and the slices.
+    tl::expected<void, ErrorCode> ReadFileSpansWithXds(
+        const std::vector<std::string>& paths,
+        const std::vector<uint64_t>& offsets,
+        const std::vector<std::vector<Slice>>& slice_lists);
+
     tl::expected<void, ErrorCode> BatchGetOffloadObject(
         const std::string& transfer_engine_addr,
         const std::vector<std::string>& keys,
@@ -913,6 +922,8 @@ class Client {
 
     // Core components
     std::shared_ptr<TransferEngine> transfer_engine_;
+    mutable std::mutex xds_file_segments_mutex_;
+    std::unordered_map<std::string, SegmentHandle> xds_file_segments_;
     MasterClient master_client_;
     std::unique_ptr<TransferSubmitter> transfer_submitter_;
 

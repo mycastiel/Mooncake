@@ -200,6 +200,15 @@ tl::expected<void, ErrorCode> FileStorage::Init() {
             return ErrorCode::OK;
         });
 
+    if (auto bucket =
+            std::dynamic_pointer_cast<BucketStorageBackend>(storage_backend_)) {
+        auto indexed = bucket->IndexSiblingDirectories();
+        if (!indexed) {
+            LOG(WARNING) << "Sibling offload index failed: "
+                         << indexed.error();
+        }
+    }
+
     if (!scan_meta_result) {
         if (config_.enable_dfs &&
             scan_meta_result.error() == ErrorCode::NOT_SUPPORTED) {
@@ -286,6 +295,20 @@ tl::expected<FileStorage::BatchGetResult, ErrorCode> FileStorage::BatchGet(
     VLOG(1) << "Time taken for FileStorage::BatchGet: " << elapsed_time
             << "us, key size: " << keys.size() << ", batch_id: " << batch_id;
     return batch_result;
+}
+
+std::vector<std::optional<DiskValueLocation>> FileStorage::LocateValues(
+    const std::vector<std::string>& keys) {
+    std::vector<std::optional<DiskValueLocation>> locations;
+    locations.reserve(keys.size());
+    if (!storage_backend_) {
+        locations.resize(keys.size());
+        return locations;
+    }
+    for (const auto& key : keys) {
+        locations.push_back(storage_backend_->LocateValue(key));
+    }
+    return locations;
 }
 
 tl::expected<FileStorage::LocalBatchResult, ErrorCode>

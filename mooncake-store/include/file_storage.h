@@ -77,6 +77,10 @@ class FileStorage {
         const std::vector<std::string>& keys,
         const std::vector<int64_t>& sizes);
 
+    // Same order as keys. A missing key is nullopt.
+    std::vector<std::optional<DiskValueLocation>> LocateValues(
+        const std::vector<std::string>& keys);
+
     [[nodiscard]] bool HasPinnedRestoreArena() const {
         return pinned_restore_arena_allocator_ != nullptr;
     }

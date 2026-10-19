@@ -68,7 +68,9 @@ class Transport {
         uint64_t target_offset;
         size_t length;
         int advise_retry_cnt = 0;
-        // Per-request transport pin, TENT only.
+        // Per-request transport pin, TENT only. 0 is UNSPEC.
+        // kTransportHintXds matches tent::TransportType::XDS.
+        static constexpr int kTransportHintXds = 13;
         int transport_hint = 0;
         // Adjacent requests in a group may be scheduled as one unit.
         uint64_t task_group_id = kNoTaskGroup;

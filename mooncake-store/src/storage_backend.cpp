@@ -19,7 +19,10 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <iterator>
 #include <unordered_set>
+#include <filesystem>
 
 #include <ylt/struct_pb.hpp>
 
@@ -2088,6 +2091,115 @@ tl::expected<void, ErrorCode> BucketStorageBackend::BatchLoad(
     return {};
 }
 
+tl::expected<size_t, ErrorCode>
+BucketStorageBackend::IndexSiblingDirectories() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path self = fs::weakly_canonical(storage_path_, ec);
+    if (ec || !self.has_parent_path()) return 0;
+    const fs::path parent = self.parent_path();
+    size_t added = 0;
+    for (const auto& dir : fs::directory_iterator(parent, ec)) {
+        if (ec || !dir.is_directory()) continue;
+        const fs::path canon = fs::weakly_canonical(dir.path(), ec);
+        if (ec || canon == self) continue;
+        for (const auto& file : fs::directory_iterator(canon, ec)) {
+            if (ec || file.path().extension() != BUCKET_METADATA_FILE_SUFFIX)
+                continue;
+            fs::path data = file.path();
+            data.replace_extension(BUCKET_DATA_FILE_SUFFIX);
+            if (!fs::is_regular_file(data, ec)) continue;
+            std::ifstream in(file.path(), std::ios::binary);
+            if (!in) continue;
+            std::string blob((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+            BucketMetadata metadata;
+            try {
+                struct_pb::from_pb(metadata, blob);
+            } catch (const std::exception& e) {
+                LOG(WARNING) << "Skip sibling metadata " << file.path()
+                             << ": " << e.what();
+                continue;
+            }
+            if (metadata.keys.size() != metadata.metadatas.size()) continue;
+            SharedMutexLocker lock(&mutex_);
+            for (size_t i = 0; i < metadata.keys.size(); ++i) {
+                const auto& key = metadata.keys[i];
+                if (object_bucket_map_.find(key) != object_bucket_map_.end() ||
+                    external_values_.find(key) != external_values_.end()) {
+                    continue;
+                }
+                ExternalDiskValue value;
+                value.path = data.string();
+                value.offset = static_cast<uint64_t>(
+                    metadata.metadatas[i].offset + metadata.metadatas[i].key_size);
+                value.length =
+                    static_cast<uint64_t>(metadata.metadatas[i].data_size);
+                external_values_.emplace(key, std::move(value));
+                added++;
+            }
+        }
+    }
+    LOG(INFO) << "Indexed sibling offload keys=" << added
+              << " under " << parent;
+    return added;
+}
+
+std::optional<DiskValueLocation> BucketStorageBackend::LocateValue(
+    const std::string& key) {
+    {
+        SharedMutexLocker lock(&mutex_, shared_lock);
+        auto ext = external_values_.find(key);
+        if (ext != external_values_.end()) {
+            DiskValueLocation location;
+            location.path = ext->second.path;
+            location.offset = ext->second.offset;
+            location.length = ext->second.length;
+            return location;
+        }
+    }
+    std::shared_ptr<BucketMetadata> bucket;
+    int64_t value_offset = 0;
+    int64_t value_size = 0;
+    int64_t bucket_id = 0;
+    {
+        SharedMutexLocker lock(&mutex_, shared_lock);
+        auto object_it = object_bucket_map_.find(key);
+        if (object_it == object_bucket_map_.end()) return std::nullopt;
+        bucket_id = object_it->second.bucket_id;
+        auto bucket_it = buckets_.find(bucket_id);
+        if (bucket_it == buckets_.end()) return std::nullopt;
+        bucket = bucket_it->second;
+        value_offset = object_it->second.offset + object_it->second.key_size;
+        value_size = object_it->second.data_size;
+    }
+    auto path = GetBucketDataPath(bucket_id);
+    if (!path || value_offset < 0 || value_size < 0) return std::nullopt;
+
+    struct ReadPin {
+        std::shared_ptr<BucketMetadata> bucket;
+        explicit ReadPin(std::shared_ptr<BucketMetadata> held)
+            : bucket(std::move(held)) {
+            if (bucket) {
+                bucket->inflight_reads_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        ~ReadPin() {
+            if (bucket) {
+                bucket->inflight_reads_.fetch_sub(1,
+                                                  std::memory_order_release);
+            }
+        }
+    };
+
+    DiskValueLocation location;
+    location.path = path.value();
+    location.offset = static_cast<uint64_t>(value_offset);
+    location.length = static_cast<uint64_t>(value_size);
+    location.pin = std::make_shared<ReadPin>(std::move(bucket));
+    return location;
+}
+
 tl::expected<void, ErrorCode> BucketStorageBackend::GetBucketKeys(
     int64_t bucket_id, std::vector<std::string>& bucket_keys) {
     SharedMutexLocker locker(&mutex_, shared_lock);
@@ -2557,12 +2669,25 @@ BucketStorageBackend::BuildBucket(
     std::vector<iovec>& iovs, std::vector<StorageObjectMetadata>& metadatas) {
     auto bucket = std::make_shared<BucketMetadata>();
     int64_t storage_offset = 0;
+    static constexpr char kNdsAlignPad[512] = {};
     for (const auto& object : batch_object) {
         if (object.second.empty()) {
             LOG(ERROR) << "Failed to create bucket, object is empty";
             return tl::make_unexpected(ErrorCode::INVALID_KEY);
         }
         int64_t object_total_size = 0;
+        if (UseXdsDiskRead()) {
+            const int64_t value_at =
+                storage_offset + static_cast<int64_t>(object.first.size());
+            const int64_t aligned_value = (value_at + 511) & ~int64_t{511};
+            const int64_t pad = aligned_value - value_at;
+            if (pad > 0) {
+                iovs.emplace_back(iovec{const_cast<char*>(kNdsAlignPad),
+                                        static_cast<size_t>(pad)});
+                bucket->data_size += pad;
+                storage_offset += pad;
+            }
+        }
         iovs.emplace_back(
             iovec{const_cast<char*>(object.first.data()), object.first.size()});
         for (const auto& slice : object.second) {
@@ -5479,8 +5604,36 @@ tl::expected<void, ErrorCode> OffsetAllocatorStorageBackend::BatchLoad(
 
     // read_plans destructor releases all AllocationPtr references
     // Physical extents freed only when last reference drops
-
     return {};
+}
+
+std::optional<DiskValueLocation> OffsetAllocatorStorageBackend::LocateValue(
+    const std::string& key) {
+    if (key.size() > kMaxKeyLen) return std::nullopt;
+    size_t shard_idx = ShardForKey(key);
+    auto& shard = shards_[shard_idx];
+    SharedMutexLocker lock(&shard.mutex, /*shared_mode=*/shared_lock);
+    auto it = shard.map.find(key);
+    if (it == shard.map.end() || !data_file_) return std::nullopt;
+    const auto& entry = it->second;
+    const uint64_t value_offset =
+        entry.offset +
+        RecordHeader::ValueOffsetInRecord(static_cast<uint32_t>(key.size()));
+
+    struct ReadPin {
+        AllocationPtr allocation;
+        std::shared_ptr<StorageFile> file;
+    };
+    auto pin = std::make_shared<ReadPin>();
+    pin->allocation = entry.allocation;
+    pin->file = data_file_;
+
+    DiskValueLocation location;
+    location.path = GetDataFilePath();
+    location.offset = value_offset;
+    location.length = entry.value_size;
+    location.pin = std::move(pin);
+    return location;
 }
 
 //-----------------------------------------------------------------------------

@@ -81,6 +81,7 @@ set(MOONCAKE_STORE_CLIENT_SOURCES
     client_buffer.cpp
     aligned_client_buffer.cpp
     real_client.cpp
+    nds_disk_io.cpp
     registered_pinned_memory.cpp
     dummy_client.cpp
     shm_helper.cpp

@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_set>
@@ -25,6 +26,15 @@ struct FileRecord {
     std::string path;
     uint64_t size;
     std::string key;  // Associated object key for eviction tracking
+};
+
+// Where one stored value sits in a file. `pin` keeps the extent alive for
+// the duration of a direct read.
+struct DiskValueLocation {
+    std::string path;
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    std::shared_ptr<void> pin;
 };
 
 struct BucketObjectMetadata {
@@ -405,6 +415,13 @@ class StorageBackendInterface {
 
     virtual tl::expected<void, ErrorCode> BatchLoad(
         std::unordered_map<std::string, Slice>& batched_slices) = 0;
+
+    // File path and value offset for a direct read. Backends that do not
+    // expose a raw value range return nullopt.
+    virtual std::optional<DiskValueLocation> LocateValue(
+        const std::string& /*key*/) {
+        return std::nullopt;
+    }
 
     virtual tl::expected<bool, ErrorCode> IsExist(const std::string& key) = 0;
 
@@ -913,6 +930,13 @@ class BucketStorageBackend : public StorageBackendInterface {
     tl::expected<void, ErrorCode> BatchLoad(
         std::unordered_map<std::string, Slice>& batched_slices) override;
 
+    std::optional<DiskValueLocation> LocateValue(
+        const std::string& key) override;
+
+    // Read-only index of bucket files in sibling rank directories. A local
+    // NDS read can then open another rank's file on this same machine.
+    tl::expected<size_t, ErrorCode> IndexSiblingDirectories();
+
     /**
      * @brief Retrieves the list of object keys belonging to a specific bucket.
      * @param bucket_id The unique identifier of the bucket to query.
@@ -1211,6 +1235,13 @@ class BucketStorageBackend : public StorageBackendInterface {
     int64_t total_size_ GUARDED_BY(mutex_) = 0;
     std::unordered_map<std::string, StorageObjectMetadata> GUARDED_BY(mutex_)
         object_bucket_map_;
+    struct ExternalDiskValue {
+        std::string path;
+        uint64_t offset = 0;
+        uint64_t length = 0;
+    };
+    std::unordered_map<std::string, ExternalDiskValue> GUARDED_BY(mutex_)
+        external_values_;
     std::unordered_set<std::string> GUARDED_BY(mutex_) pending_eviction_keys_;
     std::unordered_set<std::string> GUARDED_BY(mutex_) pending_write_keys_;
     int64_t pending_eviction_size_ GUARDED_BY(mutex_) = 0;
@@ -1287,6 +1318,9 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
      */
     tl::expected<void, ErrorCode> BatchLoad(
         std::unordered_map<std::string, Slice>& batched_slices) override;
+
+    std::optional<DiskValueLocation> LocateValue(
+        const std::string& key) override;
 
     /**
      * @brief Checks whether an object with the specified key exists in the

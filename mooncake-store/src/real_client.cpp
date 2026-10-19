@@ -31,6 +31,7 @@
 #include "utils.h"
 #include "rpc_types.h"
 #include "file_storage.h"
+#include "nds_disk_io.h"
 #include "device/accelerator_registry.h"
 #include "default_config.h"
 #include "uds_transport.h"
@@ -1140,6 +1141,10 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
             LOG(ERROR) << "file storage init failed with error: "
                        << init_result.error();
             return init_result;
+        }
+        if (UseXdsDiskRead() && !InitNdsDiskIo()) {
+            LOG(ERROR) << "NDS disk io init failed";
+            return tl::unexpected(ErrorCode::INTERNAL_ERROR);
         }
     }
     client_requester_ = std::make_shared<ClientRequester>();
@@ -6849,6 +6854,82 @@ RealClient::batch_get_into_offload_object_internal(
             }
         }
         sizes.emplace_back(storage_size);
+    }
+
+    if (UseXdsDiskRead() && !read_range && file_storage_ && client_ &&
+        !objects.empty()) {
+        // KV load destinations are the cache allocated before the request.
+        // Querying each slice with aclrtPointerGetAttributes takes the NPU
+        // runtime and stalls behind the compute thread's graph replay.
+        auto locations = file_storage_->LocateValues(storage_keys);
+        bool aligned = locations.size() == keys.size();
+        bool located = aligned;
+        uint64_t nbytes = 0;
+        for (size_t i = 0; aligned && i < locations.size(); ++i) {
+            const auto &location = locations[i];
+            if (!location) {
+                located = false;
+                aligned = false;
+                break;
+            }
+            if (!IsNdsSectorAligned(location->offset) ||
+                !IsNdsSectorAligned(location->length)) {
+                aligned = false;
+                break;
+            }
+            uint64_t sum = 0;
+            for (const auto &slice : objects.at(keys[i])) {
+                if (slice.size == 0) continue;
+                if (!IsNdsSectorAligned(
+                        reinterpret_cast<uint64_t>(slice.ptr)) ||
+                    !IsNdsSectorAligned(slice.size)) {
+                    aligned = false;
+                    break;
+                }
+                sum += slice.size;
+            }
+            if (sum != location->length) aligned = false;
+            nbytes += location->length;
+        }
+        if (aligned) {
+            std::vector<std::string> paths;
+            std::vector<uint64_t> file_offsets;
+            std::vector<std::vector<Slice>> slice_lists;
+            paths.reserve(keys.size());
+            file_offsets.reserve(keys.size());
+            slice_lists.reserve(keys.size());
+            for (size_t i = 0; i < keys.size(); ++i) {
+                paths.push_back(locations[i]->path);
+                file_offsets.push_back(locations[i]->offset);
+                slice_lists.push_back(objects.at(keys[i]));
+            }
+            auto xds_result = ReadDiskToDeviceWithNds(
+                paths, file_offsets, slice_lists);
+            if (xds_result) {
+                LOG(INFO) << "NDS disk read done, keys=" << keys.size()
+                          << " bytes=" << nbytes
+                          << " bandwidth="
+                          << (xds_result->elapsed_us == 0
+                                  ? 0
+                                  : (static_cast<double>(nbytes) /
+                                     1048576.0) /
+                                        (static_cast<double>(
+                                             xds_result->elapsed_us) /
+                                         1e6))
+                          << "MB/s";
+                return {};
+            }
+            LOG(WARNING) << "NDS disk read failed, falling back to SSD "
+                            "pread: "
+                         << xds_result.error();
+        } else if (!located) {
+            LOG(WARNING) << "NDS disk read skipped: storage backend has "
+                            "no raw value offset for these keys";
+        } else {
+            LOG(WARNING)
+                << "NDS disk read skipped: value offset, length, or "
+                   "destination is not 512-byte aligned";
+        }
     }
 
     const bool local_batch =

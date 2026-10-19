@@ -339,6 +339,8 @@ std::string TransferEngine::showLinks(bool json) const {
 #include "tent/transfer_engine.h"
 #include "tent/common/config.h"
 #include "tent/common/types.h"
+#include <cstdlib>
+#include <cstring>
 #include "tent/runtime/topology.h"
 #include "topology.h"
 
@@ -472,6 +474,14 @@ int TransferEngine::init(const std::string& metadata_conn_string,
         auto config = std::make_shared<mooncake::tent::Config>();
         if (!local_server_name.empty())
             config->set("local_segment_name", local_server_name);
+        const char* use_xds = std::getenv("MOONCAKE_OFFLOAD_USE_XDS");
+        if (use_xds && use_xds[0] != '\0' && std::strcmp(use_xds, "0") != 0 &&
+            std::strcmp(use_xds, "false") != 0 &&
+            std::strcmp(use_xds, "False") != 0) {
+            config->set("transports/xds/enable", true);
+            config->set("transports/xds/io_batch_depth", 256);
+            LOG(INFO) << "NDS disk read enabled: XDS transport installed";
+        }
         if (metadata_conn_string == P2PHANDSHAKE) {
             config->set("metadata_type", "p2p");
         } else {

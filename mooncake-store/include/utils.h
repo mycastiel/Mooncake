@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <linux/memfd.h>
 #include <linux/mman.h>
@@ -481,4 +482,19 @@ std::string ResolveMooncakeHostId(const std::string& local_hostname);
 std::string ResolvePathFromKey(const std::string& key,
                                const std::string& root_dir,
                                const std::string& fsdir);
+
+// When set, local SSD offload reads whose destination is device memory go
+// through the XDS transport. Writes pad bucket values onto 512-byte file
+// offsets so that read can use the same files.
+inline bool UseXdsDiskRead() {
+    const char* value = std::getenv("MOONCAKE_OFFLOAD_USE_XDS");
+    if (value == nullptr || value[0] == '\0') return false;
+    return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+           std::strcmp(value, "False") != 0;
+}
+
+inline bool IsNdsSectorAligned(uint64_t value) {
+    return (value & 511ull) == 0;
+}
+
 }  // namespace mooncake

@@ -30,8 +30,10 @@
 #include <vector>
 #include <ylt/struct_json/json_reader.h>
 
+#include "error.h"
 #include "transfer_engine.h"
 #include "topology.h"
+#include "utils.h"
 #include "transfer_task.h"
 #include "transport/transport.h"
 #include "config.h"
@@ -3778,6 +3780,101 @@ tl::expected<void, ErrorCode> Client::ReportSsdCapacity(
         return tl::make_unexpected(response.error());
     }
     return {};
+}
+
+tl::expected<void, ErrorCode> Client::ReadFileSpansWithXds(
+    const std::vector<std::string>& paths,
+    const std::vector<uint64_t>& offsets,
+    const std::vector<std::vector<Slice>>& slice_lists) {
+    if (!transfer_engine_ || !transfer_engine_->isUsingTent() ||
+        !transfer_submitter_) {
+        return tl::make_unexpected(ErrorCode::INVALID_READ);
+    }
+    if (paths.size() != offsets.size() || paths.size() != slice_lists.size()) {
+        return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+    }
+
+    std::vector<TransferRequest> requests;
+    for (size_t i = 0; i < paths.size(); ++i) {
+        const std::string segment_name = "file://" + paths[i];
+        SegmentHandle handle = 0;
+        {
+            std::lock_guard<std::mutex> lock(xds_file_segments_mutex_);
+            auto it = xds_file_segments_.find(segment_name);
+            if (it == xds_file_segments_.end()) {
+                handle = transfer_engine_->openSegment(segment_name);
+                if (handle == static_cast<SegmentHandle>(ERR_INVALID_ARGUMENT)) {
+                    LOG(ERROR) << "XDS failed to open " << segment_name;
+                    return tl::make_unexpected(ErrorCode::FILE_OPEN_FAIL);
+                }
+                xds_file_segments_.emplace(segment_name, handle);
+            } else {
+                handle = it->second;
+            }
+        }
+        uint64_t file_offset = offsets[i];
+        for (const auto& slice : slice_lists[i]) {
+            if (slice.size == 0 || slice.ptr == nullptr) continue;
+            TransferRequest request;
+            request.opcode = TransferRequest::READ;
+            request.source = slice.ptr;
+            request.target_id = handle;
+            request.target_offset = file_offset;
+            request.length = slice.size;
+            request.transport_hint = TransferRequest::kTransportHintXds;
+            requests.push_back(request);
+            file_offset += slice.size;
+        }
+    }
+    if (requests.empty()) return {};
+
+    const BatchID batch_id = transfer_engine_->allocateBatchID(requests.size());
+    if (batch_id == INVALID_BATCH_ID) {
+        LOG(ERROR) << "XDS allocateBatchID failed";
+        return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
+    }
+    Status submit_status = transfer_engine_->submitTransfer(batch_id, requests);
+    if (!submit_status.ok()) {
+        LOG(ERROR) << "XDS submitTransfer failed: "
+                   << submit_status.message();
+        transfer_engine_->freeBatchID(batch_id);
+        return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool pending = false;
+        bool failed = false;
+        for (size_t i = 0; i < requests.size(); ++i) {
+            TransferStatus status;
+            Status query =
+                transfer_engine_->getTransferStatus(batch_id, i, status);
+            if (!query.ok() || status.s == TransferStatusEnum::FAILED ||
+                status.s == TransferStatusEnum::CANCELED ||
+                status.s == TransferStatusEnum::INVALID ||
+                status.s == TransferStatusEnum::TIMEOUT) {
+                failed = true;
+                break;
+            }
+            if (status.s != TransferStatusEnum::COMPLETED) pending = true;
+        }
+        if (failed) {
+            transfer_engine_->freeBatchID(batch_id);
+            LOG(ERROR) << "XDS file read failed";
+            return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
+        }
+        if (!pending) {
+            transfer_engine_->freeBatchID(batch_id);
+            LOG(INFO) << "NDS disk read: files=" << paths.size()
+                      << " requests=" << requests.size();
+            return {};
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    transfer_engine_->freeBatchID(batch_id);
+    LOG(ERROR) << "XDS file read timed out";
+    return tl::make_unexpected(ErrorCode::TRANSFER_FAIL);
 }
 
 tl::expected<void, ErrorCode> Client::BatchGetOffloadObject(
